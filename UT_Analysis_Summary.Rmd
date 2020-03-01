@@ -1,0 +1,854 @@
+---
+title: "UT Analysis Summary"
+author: "Will Overton"
+date: "2/10/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Summary
+
+We used a case-control design to study the effects of genetic variants on the likelihood of aortic dissection. We received genotype information on 283 controls from the University of Washington and 256 cases from the University of Texas. Of those 539 patients, we found 442 to be of likely European ancestry — 222 cases and 220 controls. Using the European dataset, we performed principal component analysis, skat-o burden tests, and single-variant burden tests. We found strong evidence of population stratification or batch effects between cases & controls, both in PC clustering and inflated burden test results.
+
+***
+
+## Quality Control
+#### Imputing Ancestry
+
+To avoid interethnic analysis, we performed Principal Component Analysis and compared samples to a reference population. We computed 5 PCs using LASER (Locating Ancestry from SEquence Reads), 3 of which we selected as significant. We imputed ancestry with k nearest neighbors, using a k value of 5, which performed with more than 99% accuracy in a train/test simulation using the reference dataset. 
+```{r,include=F}
+library(class)
+library(kableExtra)
+library(dplyr)
+library(viridisLite)
+library(directlabels)
+library(caret)
+library(ISLR)
+library(data.table)
+library(tidyverse)
+library(scales)
+#read in reference df
+ref_df<-read.table('~/Downloads/reference_pc (1)/reference_pc.txt',sep='\t',header=T)
+pops<-fread('~/Downloads/igsr-human genome diversity project.tsv.tsv')
+pops<-pops%>%select(`Population name`, `Superpopulation name`)%>%rename('population'='Population name', 'group'=`Superpopulation name`)
+pops<-rbind(as.data.frame(pops),c('Italian', 'Europe (HGDP)'),c('Papuan', 'Oceania (HGDP)'),
+            c('BiakaPygmy', 'Africa (HGDP)'), c('MbutiPygmy', 'Africa (HGDP)'),
+            c('Melanesian', 'Oceania (HGDP)'), c('BantuSouthAfrica','Africa (HGDP)'),
+            c('Mongola', 'East Asia (HGDP)'), c('Han-NChina', 'East Asia (HGDP)'))
+
+pops<-pops%>%mutate(population=ifelse(population=='Bantu Kenya','BantuKenya',population))
+ref_df<-left_join(ref_df,pops,by=c('popID'='population'))
+ref_df<-ref_df%>%mutate(group=substr(group,1,nchar(group)-7))
+
+#Find optimal K
+
+# test/train split
+train.index <- createDataPartition(ref_df$group, p = .7, list = FALSE)
+training <- ref_df[train.index,]
+testing <- ref_df[-train.index,]
+
+# run knn
+set.seed(400)
+ctrl <- trainControl(method="repeatedcv",repeats = 3)
+knnFit <- train(group ~ PC1+PC2+PC3, data = training, method = "knn", trControl = ctrl, 
+                preProcess = c("center","scale"), tuneLength = 20)
+knnFit
+
+knnFit$results%>%as.data.frame()%>%
+  ggplot(aes(x=k,y=Accuracy))+
+  geom_point()+
+  geom_errorbar(aes(x=k,ymin=Accuracy-AccuracySD,ymax=Accuracy+AccuracySD))+
+  geom_line()+
+  theme_bw()+
+  ggsave('knn_fit.png', height=6, width=8)
+
+#train chose k=5 
+
+#run on study group
+samples<-read.csv('~/Desktop/Willer/sample_status.csv')
+study_df<-read.table('~/Downloads/study_pc 3.txt',header=T)
+pred_group <- knn(ref_df[,c('PC1','PC2','PC3')],study_df[,c('PC1','PC2','PC3')],cl=ref_df[,'group'],k=5,prob=T)
+preds<-cbind(study_df,pred_group,'pred_prob'=attr(pred_group,'prob'))
+
+
+pc1pc2<-ggplot(preds,aes(x=PC1,y=PC2,color=pred_group))+
+  geom_point(aes(alpha=pred_prob,color=pred_group))+
+  geom_point(aes(alpha=pred_prob),shape=1,stroke=.05,color='black')+
+  theme_bw()+
+  geom_dl(aes(label=pred_group, color=pred_group),method='smart.grid')+
+  scale_color_brewer(palette='Set2')+
+  theme(legend.position='none')
+pc1pc3<-ggplot(preds,aes(x=PC1,y=PC3,color=pred_group))+
+  geom_point(aes(alpha=pred_prob,color=pred_group))+
+  geom_point(aes(alpha=pred_prob),shape=1,stroke=.05,color='black')+
+  theme_bw()+
+  geom_dl(aes(label=pred_group, color=pred_group),method='smart.grid')+
+  scale_color_brewer(palette='Set2')+
+  theme(legend.position='none')
+pc2pc3<-ggplot(preds,aes(x=PC2,y=PC3,color=group))+
+  geom_point(aes(alpha=pred_prob,color=pred_group))+
+  geom_point(aes(alpha=pred_prob),shape=1,stroke=.05,color='black')+
+  theme_bw()+
+  geom_dl(aes(label=pred_group, color=pred_group),method='smart.grid')+
+  scale_color_brewer(palette='Set2')+
+  theme(legend.position='none')
+
+
+preds<-left_join(preds,samples,by=c('indivID'='id'))
+summary_df<-preds%>%group_by(pred_group,status)%>%
+  summarise(cnt=n())%>%arrange(desc(cnt))%>%
+  spread(status,cnt)%>%rename('cases'='case','controls'='control','ancestry'='pred_group')%>%
+  replace_na(list(controls=0,cases=0))%>%as.data.frame()
+library(gridExtra)
+library(grid)
+grid_plot<-grid.arrange(pc1pc2,pc1pc3,pc2pc3,
+             #tableGrob(summary_df,row=NULL),
+             nrow=2,top='Predicted Ancestry', bottom=
+               textGrob('Using LASER and knn (k=5, 3 PCs)',
+                        gp=gpar(fontface=3,fontsize=9),
+                        hjust=1,x=1))
+```
+
+```{r,echo=F,fig.align='center'}
+grid.arrange(pc1pc2,pc1pc3,pc2pc3,
+             #tableGrob(summary_df,row=NULL),
+             nrow=2,top='Predicted Ancestry', bottom=
+               textGrob('Using LASER and knn (k=5, 3 PCs)',
+                        gp=gpar(fontface=3,fontsize=9),
+                        hjust=1,x=1))
+```
+
+
+Based on our knn analysis, we found 222 cases and 220 controls were of European descent & included those subsequent analysis. We excluded 97 samples of differing imputed ancestry.
+
+
+#### Genotype Filtering
+
+1. Removed very rare variants (MAF < 0.0000000000001)
+2. Removed variants with genotype missingness rate more than 5%
+3. Performed linkage disequilibrium pruning with window size 500, window shift of 50, and $r^2$ threshold of 0.2
+
+We ran additional PCA on LD pruned & subsetted genotype data.
+
+***
+
+## Principal Component Analysis
+#### Population Stratification
+We computed Principal Components using 2 methods: *LASER*, which we compared to a multiethnic reference population, and plink, which we used as covariates in burden test models. We found significant evidence of case/control population stratification or batch effects in the first 2 PCs.
+
+```{r,include=F}
+library(data.table)
+library(tidyverse)
+df<-data.table::fread('~/milewicz_phenos_sex_and_pcs.tsv')
+ggplot(df,aes(x=PC1,y=PC2,color=as.factor(Phenotype)))+
+  geom_point(alpha=.3)+
+  theme_bw()
+df<-as.data.frame(df)
+vars<-c('PC1','PC2','PC3')
+ps<-sapply(vars, function(var){
+  mytest<-t.test(df[df$Phenotype==1,var],df[df$Phenotype==0,var])
+  return(mytest$p.value)
+  }
+)
+var='PC1'
+t.test(df[df$Phenotype==1,var],df[df$Phenotype==0,var])
+ks.test(df[df$Phenotype==1,var],df[df$Phenotype==0,var])
+
+
+dat_text <- data.frame(
+  label = c(paste('p value:', formatC(ps[1:2], format = "e", digits = 2)),paste('p value:',round(ps[3],2))),
+  variable   = c('PC1', 'PC2', 'PC3'),
+  x     = c('cases', 'cases', 'cases'),
+  y     = c(-0.3, 0.2, 0.25)
+)
+
+
+
+reshape2::melt(df%>%select(IID,Sex,Phenotype,PC1,PC2,PC3),id.vars=c('IID','Sex','Phenotype'))%>%
+  mutate(group=ifelse(Phenotype==1,'cases','controls'))%>%
+  ggplot(aes(x=group,y=value))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.title.x=element_blank())+
+  labs(y="PC")+
+  facet_wrap(~variable,scales='free')+
+  geom_label(
+  data    = dat_text,
+  mapping = aes(x = x, y = y, label = label),
+  nudge_x=.5
+  )+
+  ggtitle('PCs in Cases & Controls',subtitle='p value from 2-sample t test, PCs from plink')
+#ggsave('~/Desktop/Willer/EPACTs/PCplot.jpg',height=6,width=8)
+
+
+
+df%>%mutate(group=ifelse(Phenotype==1,'cases','controls'))%>%
+  filter(PC1>-0.2)%>%
+  ggplot(aes(x=PC1,y=PC2,color=group))+
+  geom_point(alpha=.6)+
+  theme_bw()+
+  scale_color_manual(values=c('royalblue2','indianred2'))+
+  directlabels::geom_dl(aes(label=group),method='smart.grid')+
+  theme(legend.position='none')->pc1pc2
+#ggsave('~/Desktop/Willer/EPACTs/PC1PC2.jpg',height=6,width=6)
+
+df%>%mutate(group=ifelse(Phenotype==1,'cases','controls'))%>%
+  filter(PC3<0.25 & PC2 <0.4)%>%
+  ggplot(aes(x=PC2,y=PC3,color=group))+
+  geom_point(alpha=.6)+
+  theme_bw()+
+  scale_color_manual(values=c('royalblue2','indianred2'))+
+  directlabels::geom_dl(aes(label=group),method='smart.grid')+
+  theme(legend.position='none')->pc2pc3
+#ggsave('~/Desktop/Willer/EPACTs/PC2PC3.jpg',height=6,width=6)
+
+df%>%mutate(group=ifelse(Phenotype==1,'cases','controls'))%>%
+  filter(PC1>-.04 & PC3 <0.5)%>%
+  ggplot(aes(x=PC1,y=PC3,color=group))+
+  geom_point(alpha=.6)+
+  theme_bw()+
+  scale_color_manual(values=c('royalblue2','indianred2'))+
+  directlabels::geom_dl(aes(label=group),method='smart.grid')+
+  theme(legend.position='none')->pc1pc3
+#ggsave('~/Desktop/Willer/EPACTs/PC1PC3.jpg',height=6,width=6)
+
+gridExtra::grid.arrange(pc1pc2,pc2pc3,pc1pc3,ncol=2,top='Principal Components by Case/Control Status')->pc_grid
+```
+
+```{r,echo=F,fig.align='center'}
+grid.arrange(pc1pc2,pc2pc3,pc1pc3,ncol=2,top='Principal Components by Case/Control Status')
+```
+
+We tested for significant differences in mean PCs between cases & controls using Welch’s two-sample t test, which tests for a difference in the means of two normally distributed variables,, and the Kolmogorov-Smirnov test, which is a nonparametric test of distributional inequality between two variables. We found p values less than 0.00005 in every case, giving strong evidence of population stratification or batch effects between the two groups.
+
+```{r,echo=F,fig.align='center'}
+reshape2::melt(df%>%select(IID,Sex,Phenotype,PC1,PC2,PC3),id.vars=c('IID','Sex','Phenotype'))%>%
+  mutate(group=ifelse(Phenotype==1,'cases','controls'))%>%
+  ggplot(aes(x=group,y=value))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(axis.title.x=element_blank())+
+  labs(y="PC")+
+  facet_wrap(~variable,scales='free')+
+  geom_label(
+  data    = dat_text,
+  mapping = aes(x = x, y = y, label = label),
+  nudge_x=.5
+  )+
+  ggtitle('PCs in Cases & Controls',subtitle='p value from 2-sample t test, PCs from plink')
+```
+
+#### Separation
+
+Separation is a problem in generalized linear models that arises when case/control status can be completely explained by a linear combination of covariates. This is a case where we have near separation: the cases & controls are almost completely stratified by PC1. 
+
+| | n controls | n cases
+ -|----------|-
+**PC1 < 0.029** | 218 | 143
+**PC1 >= 0.029** | 2 | 79
+
+We can demonstrate this by running a simple generalized linear model based on sex & PCs.
+```{r}
+model<-glm(Phenotype~Sex+PC1+PC2+PC3,family=binomial(),data=df)
+```
+
+This gives wildly large odds ratio estimates. PC1 has a beta estimate of 236.04, which corresponds to an estimated odds raio of $e^{326.04}=3.24*10^{102}$.
+
+```{r,echo=F,warning=F}
+model<-glm(Phenotype~Sex+PC1+PC2+PC3,family=binomial(),data=df)
+model_sum=summary(model)
+data.frame(term=model_sum$coefficients%>%row.names,model_sum$coefficients)%>%
+  mutate(term=c('intercept','sex','PC1','PC2','PC3'))%>%
+  select(term,Estimate,Std..Error, `Pr...z..`)->summary_df
+summary_df<-data.frame(summary_df[,1],round(summary_df[,-c(1,4)],2),scientific(summary_df[,4]))
+kable(summary_df,format='markdown',col.names=c('Term','Beta Estimate','Standard Error','p value'))
+```
+
+We can also visualize the predicted probability of case/control status accross the observed range of PC1. It, again, shows the stark separation between cases & controls by PC1.
+
+```{r,echo=F,warning=F}
+df%>%
+  ggplot(aes(x=PC1,y=Phenotype))+
+  geom_point()+
+  geom_smooth(method='glm',method.args=list(family='binomial'))+
+  coord_cartesian(xlim=c(-0.18,0.1))+
+  theme_bw()+
+  ggtitle('Fitted Probabilty Based on PC1')
+```
+
+
+### University of Michigan Comparison
+
+As a basis for comparison, we performed the same analysis pipeline on the University of Michigan’s Whole Exome Sequencing (1) cohort. We found no statistical evidence of population stratification using the same statistical tests.
+
+```{r,include=F,fig.align='center'}
+wes1<-data.table::fread('~/wes1_finalped_withpcs.ped')
+mile<-data.table::fread('~/milewicz_phenos_sex_and_pcs.tsv')
+rbind(mile%>%
+        mutate(study='UT',
+               group=ifelse(Phenotype==1,'cases','controls'))%>%
+        select(PC1,PC2,PC3,study,group),
+      wes1%>%
+        mutate(study='U of M',
+               group=ifelse(phenotype==2,'cases','controls'))%>%
+        select(PC1,PC2,PC3,study,group))->df
+
+df%>%filter(PC2<0.5)%>%
+  ggplot(aes(x=PC1,y=PC2,color=group))+
+  geom_point(alpha=.5)+
+  theme_bw()+
+  scale_color_manual(values=c('darkblue','wheat3'))+
+  directlabels::geom_dl(aes(label=group),method='smart.grid')+
+  facet_wrap(~study,scales='free')+
+  theme(legend.position='none'
+        #text=element_text(size=20)
+        )+
+  ggtitle('Population Stratification: PCs 1 & 2',subtitle='University of Michigan & Texas')->pcs
+#ggsave('WES1_vs_UT_PCs.jpg',height=6,width=10)
+
+
+
+
+
+t_wes=t.test(wes1[wes1$phenotype==2,]$PC1,wes1[wes1$phenotype==1,]$PC1)
+p_wes=t_wes$p.value
+
+t_mile=t.test(mile[mile$Phenotype==0,]$PC1,mile[mile$Phenotype==1,]$PC1)
+p_mile=t_mile$p.value
+ps=c(p_wes,p_mile)
+dat_text <- data.frame(
+  label = c(paste('p value:',round(ps[1],2)),paste('p value:', formatC(ps[2], format = "e", digits = 2))),
+  study   = c('U of M','UT'),
+  x     = c('cases', 'cases'),
+  y     = c(-0.2, -0.4)
+)
+
+
+
+reshape2::melt(df%>%select(group,study,PC1),id.vars=c('group','study'))%>%
+  ggplot(aes(x=group,y=value))+
+  geom_boxplot(aes(fill=group),color='black',alpha=.3)+
+  theme_bw()+
+  theme(legend.position='none'
+        #text=element_text(size=20)
+        )+
+  labs(y="PC1",x="")+
+  scale_fill_manual(values=c('darkblue','wheat3'))+
+  facet_wrap(~study,scales='free')+
+  geom_label(
+    data    = dat_text,
+    mapping = aes(x = x, y = y, label = label),
+    nudge_x=.5
+  )+
+  ggtitle('PC1 in University of Michigan & Texas',subtitle='by case/control status, p value from 2-sample t test')->boxes
+#ggsave('casecontrol_PC1_ttest_bygroup.jpg',height=6,width=10)
+```
+
+```{r,echo=F,fig.width=10,fig.height=4,fig.align='center'}
+grid.arrange(pcs,boxes,ncol=2,heights=3,widths=c(6,6))
+```
+
+***
+
+## Aggregated Tests
+#### Annotation & Group file
+
+After using plink to estimate kinship, we used EPACTs to annotate vcfs. We generated group files of likely deleterious genes & marker names to be included in genewise burden tests using two functional annotation subsets, one of which only included stop gain & essential splice site variants (LoF), the other considering and nonsynonymous, essential splice sites, normal splice sites, start loss, stop loss, and stop gain variants (All). 
+
+#### Genewise tests
+
+#### Model 1: No PCs
+
+We performed *skat-o* tests on the QC'd dataset, with case/control status as a binary outcome. Skat-o tests are a linear combination of burden and sequence kernel association (SKAT) tests, which use aggregated information from a large number of variants and tests for association with a trait. 
+
+One possible solution to the problem of separation in the first prinicpal component is to run the model without PCs as covariates. We ran a preliminary skat-o model with Sex as a covariate, a minimum minor allele frequency of 1e-6, and a maximum allele frequency of 0.05. 
+```{r,include=F,warning=F}
+options(stringsAsFactors=F)
+#library("plotrix")
+library("data.table")
+library("RColorBrewer")
+library("ggplot2")
+library("tidyr")
+
+# QQ plot function
+qqplotdata <- function(logpvector){
+  o = sort(logpvector,decreasing=T)
+  e = -log10(ppoints(length(o)))
+  qqdata <- data.frame(o,e)
+  qqdata$o <- round(qqdata$o,3)
+  qqdata$e <- round(qqdata$e,3)
+  keepU <- which(!duplicated(qqdata))
+  qqdata <- qqdata[keepU,]
+  
+  N <- length(logpvector) ## number of p-values
+  ## create the confidence intervals
+  qqdata$c975 <- NA
+  qqdata$c025 <- NA
+  
+  ## the jth order statistic from a
+  ## uniform(0,1) sample
+  ## has a beta(j,n-j+1) distribution
+  ## (Casella & Berger, 2002,
+  ## 2nd edition, pg 230, Duxbury)
+  
+  for(i in 1:length(keepU)){
+    j <- keepU[i]
+    qqdata$c975[i] <- -log10(qbeta(0.975,j,N-j+1))
+    qqdata$c025[i] <- -log10(qbeta(0.025,j,N-j+1))
+  }
+  return(qqdata)
+}
+
+# convert -log10(P) values to as.character(P)
+log10toP <- function(log10P){
+  log10P <- abs(as.numeric(log10P))
+  if(is.na(log10P)) return(NA)
+  if(log10P==Inf) return(as.character(0))
+  if(log10P > 300){
+    part1 <- log10P%/%100*100
+    part2 <- log10P-part1
+    P <- format(signif(10^-part2,6), scientific = T)
+    P <- paste(as.numeric(gsub("e-.+","",P)),"E-",as.numeric(gsub(".+-","",P),sep="")+part1,sep="")
+  } else {
+    P <- signif(10^-log10P,6)
+  }
+  return(as.character(P))
+}
+
+
+#calculate lambda for genomic correction
+lambdaGC<-function(log10P){
+  denom<-qchisq(0.5, df=1) #calculate denominator
+  char<-sapply(log10P,log10toP) #convert from log10P to character(P) vector
+  numer<-sapply(char,function(x) {as.numeric(x)}) #convert to numeric vector
+  #print(summary(numer)) #print summary of p-values
+  num<-qchisq(median(numer),df=1,lower.tail=F) #calculate numerator
+  lam<-num/denom #calculate lambda
+  return(lam)
+}
+```
+
+
+
+```{r,include=F,warning=F}
+df<-fread('~/Desktop/Willer/EPACTs/epacts.gene.skat.nopcs.epacts')
+df%>%mutate(chr.pos=case_when(`#CHROM`=='X'~as.numeric(paste(23,BEGIN,sep='.')),
+                              `#CHROM`=='Y'~as.numeric(paste(24,BEGIN,sep='.')),
+                              TRUE~as.numeric(paste(`#CHROM`,BEGIN,sep='.'))),
+            p=-log(PVALUE,base=10),
+            gene=sub(".*_", "", MARKER_ID))->plot_data
+plot_data%>%
+  ggplot(aes(x=chr.pos,y=p,color=`#CHROM`))+
+  geom_point(alpha=.4)+
+  theme_bw()+
+  theme(legend.position='none')+
+  viridis::scale_color_viridis(discrete=T)+
+  labs(x='chromosomal coordinates',y=expression(-log["10"]*"(p)"))+
+  ggtitle('Manhattan Plot',subtitle='Skat-o test with no PCs')->manhattan
+
+```
+
+```{r,include=F,warning=F}
+gwas<-df
+  gwas$log10P <- -log10(gwas[,'PVALUE'])
+  ycol<-'log10P'
+  
+  gwas<-gwas[complete.cases(gwas),] #remove NAs
+  
+  
+  ntest<-nrow(gwas) #number of genes tested
+  
+  bon<-0.05/ntest
+  yLine<-c(-log10(bon))
+  
+  
+  ## histogram of number of markers per category
+  cat_col<-grep("MACCate",names(gwas))
+  
+  fbin <- character(0)
+  fN <- integer(0)
+  fx <- numeric(0)
+  fy <- numeric(0)
+  
+  
+  plotdata <- qqplotdata(gwas[[ycol]])
+  lambda<-lambdaGC(gwas[[ycol]]) #calculate lambda for this bin
+  
+  fx <- c(fx,plotdata$e)
+  fy <- c(fy,plotdata$o)
+  conf <- data.frame('x'=c(plotdata$e,rev(plotdata$e)),
+                     'y'=c(plotdata$c975,rev(plotdata$c025)))
+  color<-"#56B4E9"
+  #plotdata$lambda<-lambda
+
+
+ggplot(plotdata,aes(x=e,y=o))+
+  geom_ribbon(aes(ymin=c025,ymax=c975),alpha=.2,fill="#56B4E9")+
+  geom_line(aes(x=e,y=e),linetype='dashed',color='darkgrey')+
+  geom_point(alpha=.6,color="#56B4E9")+
+  geom_label(aes(x=3,y=1),label=paste('Lambda:',format(lambda,digits=4)))+
+  theme_minimal()+
+  labs(x=expression('expected '-log["10"]*"(p)"),y=expression('observed '-log["10"]*"(p)"))+
+  ggtitle('QQ Plot',subtitle='Skat-o test with no PCs')->qq
+
+```
+
+```{r,echo=F,warning=F,fig.align='center',fig.height=5,fig.width=10}
+grid.arrange(manhattan,qq,ncol=2)
+```
+
+The qq plot shows evidence of significant inflation. Given that PCs significantly explain the variance of case/control status, we'll include them in as covariates to reduce inflation going forward.
+
+--- 
+
+#### Using PCs as covariates
+
+We formulated four *skat-o* models with small-sample adjustments using a combination of MAF filters (<.05 and <.01) and functional annotation subsets. All models had minimum minor allele counts of 1, minimum minor allele frequencies of 1e-6, and minimum call rates of 0.5. We included sex and the first 5 principal components as covariates.
+
+```{r,echo=F,warning=F,fig.align='center',fig.height=6,fig.width=8}
+setwd('~/Desktop/Willer/EPACTs/')
+files=c('epacts.gene.maf_05.skat.epacts','epacts.gene.skat.epacts','epacts.gene.maf_01.skat.epacts','epacts.gene.lof.maf_01.skat.epacts')
+df<-lapply(files,fread)
+for (i in 1:length(df)){
+  df[[i]]$model<-files[i]
+}
+df=rlist::list.rbind(df)
+df%>%mutate(maf=case_when(model=='epacts.gene.maf_05.skat.epacts'~'MAF<.05',
+                          model=='epacts.gene.skat.epacts'~'MAF<.05',
+                          model=='epacts.gene.maf_01.skat.epacts'~'MAF<.01',
+                          model=='epacts.gene.lof.maf_01.skat.epacts'~'MAF<.01'),
+            lof=case_when(model=='epacts.gene.maf_05.skat.epacts'~'LoF',
+                          model=='epacts.gene.skat.epacts'~'All',
+                          model=='epacts.gene.maf_01.skat.epacts'~'All',
+                          model=='epacts.gene.lof.maf_01.skat.epacts'~'LoF'))->df
+
+df%>%mutate(chr.pos=case_when(`#CHROM`=='X'~as.numeric(paste(23,BEGIN,sep='.')),
+                              `#CHROM`=='Y'~as.numeric(paste(24,BEGIN,sep='.')),
+                              TRUE~as.numeric(paste(`#CHROM`,BEGIN,sep='.'))),
+            p=-log(PVALUE,base=10),
+            gene=sub(".*_", "", MARKER_ID))->plot_data
+plot_data%>%
+  ggplot(aes(x=chr.pos,y=p,color=`#CHROM`))+
+  geom_point(alpha=.4)+
+  theme_bw()+
+  theme(legend.position='none')+
+  viridis::scale_color_viridis(discrete=T)+
+  ggrepel::geom_label_repel(data=plot_data%>%filter(p>4),
+                            aes(label=paste(gene,'\n','p:',PVALUE)),
+                            nudge_y=.2,
+                            box.padding=.5,
+                            size = 3)+
+  labs(x='chromosomal coordinates',y=expression(-log["10"]*"(p)"))+
+  ggtitle('Manhattan Plots Across Models',subtitle='Epacts skat-o')+
+  facet_grid(lof~maf)
+```
+
+The quantile-quantile plots from those 4 models showed signs of significant inflation. Given the small sample size, it should've been difficult to detect a signal, especially of the magnitude shown in the All variants / MAF <.05 model. The population stratification evidenced by our earlier PCA would lead to inflated results like those seen below.
+
+```{r,echo=F,fig.align='center',fig.height=6,fig.width=8,warning=F}
+plotdata<-fread('qq_plot_data.tsv')
+plotdata<-plotdata%>%mutate(maf=ifelse(maf=='MAF: .01','MAF<.01','MAF<.05'))
+labeldat<-plotdata%>%select(lambda,maf,variants)%>%unique
+
+ggplot(plotdata,aes(x=e,y=o))+
+  geom_ribbon(aes(ymin=c025,ymax=c975),alpha=.2,fill="#56B4E9")+
+  geom_line(aes(x=e,y=e),linetype='dashed',color='darkgrey')+
+  geom_point(alpha=.6,color="#56B4E9")+
+  geom_label(data=labeldat,aes(x=3,y=1,label=paste('Lambda:',format(lambda,digits=4))))+
+  theme_minimal()+
+  labs(x=expression('expected '-log["10"]*"(p)"),y=expression('observed '-log["10"]*"(p)"))+
+  facet_grid(variants~maf)+
+  ggtitle('QQ Plots Across Models',subtitle='EPACTs skat-o')
+```
+
+#### Single-variant tests
+
+We also ran single-variant Logistic Score Tests on the same annotated vcfs. We used sex and the first 5 PCs as covariates, with a maximum MAF threshold of 0.05, a minimum MAC of 3, and a minimum MAF of 1e-6. Again, the results showed signs of significant inflation relative to our expectations at this sample size, likely due to population stratification or batch effects.
+
+```{r,include=F,warning=F}
+df<-fread('epacts.single.epacts.gz')
+df%>%mutate(chr.pos=case_when(`#CHROM`=='X'~as.numeric(paste(23,BEGIN,sep='.')),
+                              `#CHROM`=='Y'~as.numeric(paste(24,BEGIN,sep='.')),
+                              TRUE~as.numeric(paste(`#CHROM`,BEGIN,sep='.'))),
+            p=-log(PVALUE,base=10),
+            gene=sub(".*_", "", MARKER_ID))->plot_data
+plot_data%>%
+  ggplot(aes(x=chr.pos,y=p,color=`#CHROM`))+
+  geom_point(alpha=.4)+
+  theme_bw()+
+  theme(legend.position='none')+
+  viridis::scale_color_viridis(discrete=T)+
+  ggrepel::geom_label_repel(data=plot_data%>%filter(p>14),
+                            aes(label=paste(MARKER_ID,'\n','p:',PVALUE)),
+                            nudge_y=.2,
+                            box.padding=.5,
+                            size = 3)+
+  labs(x='chromosomal coordinates',y=expression(-log["10"]*"(p)"))+
+  ggtitle('Manhattan Plot',subtitle='Single variant logistic score test')->manhattan
+```
+
+```{r,include=F,warning=F}
+options(stringsAsFactors=F)
+#library("plotrix")
+library("data.table")
+library("RColorBrewer")
+library("ggplot2")
+library("tidyr")
+
+# QQ plot function
+qqplotdata <- function(logpvector){
+  o = sort(logpvector,decreasing=T)
+  e = -log10(ppoints(length(o)))
+  qqdata <- data.frame(o,e)
+  qqdata$o <- round(qqdata$o,3)
+  qqdata$e <- round(qqdata$e,3)
+  keepU <- which(!duplicated(qqdata))
+  qqdata <- qqdata[keepU,]
+  
+  N <- length(logpvector) ## number of p-values
+  ## create the confidence intervals
+  qqdata$c975 <- NA
+  qqdata$c025 <- NA
+  
+  ## the jth order statistic from a
+  ## uniform(0,1) sample
+  ## has a beta(j,n-j+1) distribution
+  ## (Casella & Berger, 2002,
+  ## 2nd edition, pg 230, Duxbury)
+  
+  for(i in 1:length(keepU)){
+    j <- keepU[i]
+    qqdata$c975[i] <- -log10(qbeta(0.975,j,N-j+1))
+    qqdata$c025[i] <- -log10(qbeta(0.025,j,N-j+1))
+  }
+  return(qqdata)
+}
+
+# convert -log10(P) values to as.character(P)
+log10toP <- function(log10P){
+  log10P <- abs(as.numeric(log10P))
+  if(is.na(log10P)) return(NA)
+  if(log10P==Inf) return(as.character(0))
+  if(log10P > 300){
+    part1 <- log10P%/%100*100
+    part2 <- log10P-part1
+    P <- format(signif(10^-part2,6), scientific = T)
+    P <- paste(as.numeric(gsub("e-.+","",P)),"E-",as.numeric(gsub(".+-","",P),sep="")+part1,sep="")
+  } else {
+    P <- signif(10^-log10P,6)
+  }
+  return(as.character(P))
+}
+
+
+#calculate lambda for genomic correction
+lambdaGC<-function(log10P){
+  denom<-qchisq(0.5, df=1) #calculate denominator
+  char<-sapply(log10P,log10toP) #convert from log10P to character(P) vector
+  numer<-sapply(char,function(x) {as.numeric(x)}) #convert to numeric vector
+  #print(summary(numer)) #print summary of p-values
+  num<-qchisq(median(numer),df=1,lower.tail=F) #calculate numerator
+  lam<-num/denom #calculate lambda
+  return(lam)
+}
+
+################################################
+############## MAIN #############################
+#################################################
+
+#parse arguments
+
+#open file, even if zipped
+
+gwas<-df
+  gwas$log10P <- -log10(gwas[,'PVALUE'])
+  ycol<-'log10P'
+  
+  gwas<-gwas[complete.cases(gwas),] #remove NAs
+  
+  
+  ntest<-nrow(gwas) #number of genes tested
+  
+  bon<-0.05/ntest
+  yLine<-c(-log10(bon))
+  
+  
+  ## histogram of number of markers per category
+  cat_col<-grep("MACCate",names(gwas))
+  
+  fbin <- character(0)
+  fN <- integer(0)
+  fx <- numeric(0)
+  fy <- numeric(0)
+  
+  
+  plotdata <- qqplotdata(gwas[[ycol]])
+  lambda<-lambdaGC(gwas[[ycol]]) #calculate lambda for this bin
+  
+  fx <- c(fx,plotdata$e)
+  fy <- c(fy,plotdata$o)
+  conf <- data.frame('x'=c(plotdata$e,rev(plotdata$e)),
+                     'y'=c(plotdata$c975,rev(plotdata$c025)))
+  color<-"#56B4E9"
+  #plotdata$lambda<-lambda
+
+
+ggplot(plotdata,aes(x=e,y=o))+
+  geom_ribbon(aes(ymin=c025,ymax=c975),alpha=.2,fill="#56B4E9")+
+  geom_line(aes(x=e,y=e),linetype='dashed',color='darkgrey')+
+  geom_point(alpha=.6,color="#56B4E9")+
+  geom_label(aes(x=4,y=1),label=paste('Lambda:',format(lambda,digits=4)))+
+  theme_minimal()+
+  labs(x=expression('expected '-log["10"]*"(p)"),y=expression('observed '-log["10"]*"(p)"))+
+  ggtitle('QQ Plot',subtitle='Single variant logistic score test')->qq
+
+```
+
+
+```{r,warning=F,echo=F,fig.align='center',fig.height=5,fig.width=10}
+grid.arrange(manhattan,qq,ncol=2)
+```
+
+#### Comparison to University of Michigan
+
+To ensure that the results were inflated due to population stratification or batch effects, we used the University of Michigan's similarly-powered Whole Exome Sequencing 1 dataset as a basis for comparison. We used the same analysis pipeline, culminating in the skat-o test and logistic score test. The results showed signs of deflation, rather than inflation, likely due to the low power expected at such a small sample size. 
+
+```{r,include=F,warning=F}
+df<-fread('WES1_manhattan/genes_withtopvars.tsv')
+df%>%mutate(chr.pos=case_when(chr=='X'~as.numeric(paste(23,BEGIN,sep='.')),
+                              chr=='Y'~as.numeric(paste(24,BEGIN,sep='.')),
+                              TRUE~as.numeric(paste(chr,BEGIN,sep='.'))),
+            p=-log(PVALUE,base=10),
+            gene=sub(".*_", "", MARKER_ID))->plot_data
+plot_data%>%
+  ggplot(aes(x=chr.pos,y=p,color=chr))+
+  geom_point(alpha=.4)+
+  theme_bw()+
+  theme(legend.position='none')+
+  viridis::scale_color_viridis(discrete=T)+
+  labs(x='chromosomal coordinates',y=expression(-log["10"]*"(p)"))+
+  ggtitle('Manhattan Plot',subtitle='Single variant logistic score test on WES1 data')->manhattan
+
+```
+
+```{r,include=F,warning=F}
+gwas<-df
+  gwas$log10P <- -log10(gwas[,'PVALUE'])
+  ycol<-'log10P'
+  
+  gwas<-gwas[complete.cases(gwas),] #remove NAs
+  
+  
+  ntest<-nrow(gwas) #number of genes tested
+  
+  bon<-0.05/ntest
+  yLine<-c(-log10(bon))
+  
+  
+  ## histogram of number of markers per category
+  cat_col<-grep("MACCate",names(gwas))
+  
+  fbin <- character(0)
+  fN <- integer(0)
+  fx <- numeric(0)
+  fy <- numeric(0)
+  
+  
+  plotdata <- qqplotdata(gwas[[ycol]])
+  lambda<-lambdaGC(gwas[[ycol]]) #calculate lambda for this bin
+  
+  fx <- c(fx,plotdata$e)
+  fy <- c(fy,plotdata$o)
+  conf <- data.frame('x'=c(plotdata$e,rev(plotdata$e)),
+                     'y'=c(plotdata$c975,rev(plotdata$c025)))
+  color<-"#56B4E9"
+  #plotdata$lambda<-lambda
+
+
+ggplot(plotdata,aes(x=e,y=o))+
+  geom_ribbon(aes(ymin=c025,ymax=c975),alpha=.2,fill="#56B4E9")+
+  geom_line(aes(x=e,y=e),linetype='dashed',color='darkgrey')+
+  geom_point(alpha=.6,color="#56B4E9")+
+  geom_label(aes(x=4,y=1),label=paste('Lambda:',format(lambda,digits=4)))+
+  theme_minimal()+
+  labs(x=expression('expected '-log["10"]*"(p)"),y=expression('observed '-log["10"]*"(p)"))+
+  ggtitle('QQ Plot',subtitle='Single variant logistic score test on WES1 data')->qq
+
+```
+
+```{r,echo=F,warning=F,fig.align='center',fig.height=5,fig.width=10}
+grid.arrange(manhattan,qq,ncol=2)
+```
+
+***
+
+## Known Genes
+
+We also looked at how well our burden tests identified the impact of 11 genes [known to be associated](https://www.sciencedirect.com/science/article/pii/S0735109718351416?via%3Dihub "link to article") with aortic aneurysm and dissection. Table values are colored according to significance.
+
+```{r,echo=F,warning=F,message=F,fig.align='center',fig.width=8,fig.height=4}
+library(data.table)
+df<-data.table::fread('~/Desktop/Willer/EPACTs/known_genes.tsv')
+genes<-df[,gene]
+path<-'~/Desktop/Willer/EPACTs/'
+files=c('epacts.gene.maf_05.skat.epacts','epacts.gene.skat.epacts','epacts.gene.maf_01.skat.epacts','epacts.gene.lof.maf_01.skat.epacts')
+knowns<-lapply(paste0(path,files),function(i){
+  df<-data.table::fread(i)
+  df[,`:=`(gene=sub(".*_", "", MARKER_ID),model=i)]
+  df[gene %in% genes]
+})
+knowns<-rlist::list.rbind(knowns)
+knowns[,`:=`(maf=case_when(model=='~/Desktop/Willer/EPACTs/epacts.gene.maf_05.skat.epacts'~'MAF<.05',
+                          model=='~/Desktop/Willer/EPACTs/epacts.gene.skat.epacts'~'MAF<.05',
+                          model=='~/Desktop/Willer/EPACTs/epacts.gene.maf_01.skat.epacts'~'MAF<.01',
+                          model=='~/Desktop/Willer/EPACTs/epacts.gene.lof.maf_01.skat.epacts'~'MAF<.01'),
+            lof=case_when(model=='~/Desktop/Willer/EPACTs/epacts.gene.maf_05.skat.epacts'~'LoF',
+                          model=='~/Desktop/Willer/EPACTs/epacts.gene.skat.epacts'~'All',
+                          model=='~/Desktop/Willer/EPACTs/epacts.gene.maf_01.skat.epacts'~'All',
+                          model=='~/Desktop/Willer/EPACTs/epacts.gene.lof.maf_01.skat.epacts'~'LoF'))]
+knowns[,`:=`(model=paste(maf,lof))]
+knowns=knowns[,.(gene,chr=`#CHROM`,BEGIN,n_variants=NUM_PASS_VARS,PVALUE,model)]
+
+df<-fread('~/Desktop/Willer/EPACTs/WES1_manhattan/genes_withtopvars.tsv')
+df[,`:=`(gene=sub(".*_", "", MARKER_ID),model='')]
+df=df[gene %in% genes]
+df=df[,.(gene,chr,BEGIN,n_variants,PVALUE,model)]
+
+df=rbind(knowns,df)
+
+df%>%
+  mutate(source=ifelse(model=='','Michigan','UT'))%>%
+  mutate(source=forcats::fct_rev(source),
+         model=forcats::fct_rev(model))%>%
+  ggplot(aes(x = source, y = gene, fill = PVALUE)) +
+  geom_tile(color = "white", size = 0.25) +
+  scale_fill_gradient(low='lightgoldenrod2',high='white')+
+  geom_text(aes(label=
+                  formatC(signif(PVALUE,digits=3), digits=2,format="fg", flag="#")))+
+  theme_minimal()+
+  theme(
+      axis.line = element_blank(),
+      axis.ticks = element_blank(),
+      axis.ticks.length = grid::unit(1, "pt"),
+      axis.title = element_blank(),
+      #axis.text.x=element_blank(),
+      legend.position = "none",
+      legend.justification = "left",
+      legend.title.align = 0.5,
+      legend.title = element_text(size = 12*12/14),
+      text=element_text(size=16)
+    )+
+  facet_grid(.~model,scales='free')+
+  ggtitle('P value associated with known genes across tests')
+```
+
+
+None of the models did a particularly good job at identifying these known genes, probably because they’re underpowered at this sample size. That none of these genes are significant in the UT models calls into question those results -- all 4 models found many significant genes, but not the known genes we identify here.
+
+***
+
+## Conclusion
+
+When cases and controls are sampled in different batches, it's impossible to control for batch effects in subsequent analysis. Batch effects can then explain too much of the outome phenotype, leading to inflated results. When the systematic difference in PCs is so large between cases & controls, we also can't effectively use a PC matching technique to control for that inflation. There are significant results from our skat-o tests, but those results are suspect in the presence of so much inflation caused by population stratification or batch effects.
+
